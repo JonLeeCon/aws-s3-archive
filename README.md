@@ -15,7 +15,7 @@ FLAGS:
     -V, --version    Prints version information
 
 OPTIONS:
-    -b, --backup <LOCATION>       Location to backup bucket to [default: /Users/jonleecon/Git/aws-s3-archive/backup]
+    -b, --backup <LOCATION>       Location to backup bucket to [default: *current_directory*/backup]
     -i, --import <IMPORT_FILE>    List of files to archive (i.e. s3://BUCKET/PREFIX)
 ```
 ## Getting Started
