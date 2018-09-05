@@ -8,9 +8,7 @@
 /* === CRATES === */
 extern crate clap;
 extern crate failure;
-#[macro_use]
-extern crate failure_derive;
-extern crate rayon;
+extern crate futures;
 extern crate rusoto_core;
 extern crate rusoto_s3;
 
@@ -18,52 +16,94 @@ extern crate rusoto_s3;
 
 /* === USE === */
 use std::env::current_dir;
-use std::fs::{create_dir, File};
+use std::fs::{create_dir, metadata, DirBuilder, File};
+use std::io::Write;
 use std::io::{BufRead, BufReader};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
+use std::thread::sleep;
+use std::time::Duration;
 
 use clap::{App, Arg};
 use failure::Error;
+use futures::stream::Stream;
+use futures::Future;
 use rusoto_core::Region;
-use rusoto_s3::{HeadObjectRequest, S3, S3Client};
-
-/* === TYPES === */
-type Result<T> = std::result::Result<T, Error>;
+use rusoto_s3::{
+  GetObjectError, GetObjectOutput, GetObjectRequest, HeadObjectError, HeadObjectRequest, S3,
+  S3Client,
+};
 
 /* === CONSTANTS === */
-
-/* === STRUCTS === */
-// #[derive(Fail, Debug)]
-// #[fail(display = "Error: Invalid String {}", _0)]
-// struct ReadLineError(String);
-
-/* === ENUMS === */
-// #[derive(Fail, Debug)]
-// enum LineError {
-//   #[fail(display = "Error: Invalid String {}", _0)]
-//   ReadLineError(String),
-
-//   #[fail(display = "{}", _0)]
-//   Io(#[cause] std::io::Error),
-// }
+const RETRY_ATTEMPTS: u32 = 3;
+const RETRY_WAIT_SECONDS: u64 = 3;
 
 /* === FUNCTIONS ===*/
 
-// fn get_info_from_line(&line) {
-
-// }
-
-fn check_and_create_directory(dir_path_in: &str) -> Result<()> {
-  let dir_path = Path::new(dir_path_in);
-  if !dir_path.exists() {
-    create_dir(dir_path)?;
+fn result_to_option_print<T, E: std::fmt::Display>(res_in: Result<T, E>) -> Option<T> {
+  match res_in {
+    Ok(res) => Some(res),
+    Err(err) => {
+      eprintln!("Error {}", err);
+      None
+    }
   }
-  Ok(())
 }
 
-// fn get_object_md5() {
+fn line_to_tuple(line: &str) -> Result<(String, String, String), String> {
+  if line.len() <= 5 {
+    return Err(format!("Invalid line: {}", line));
+  }
+  let (protocol, location) = line.split_at(5);
+  if protocol != "s3://" {
+    return Err(format!("Invalid line: {}", line));
+  }
+  let mut paths: Vec<&str> = location.split('/').collect();
+  let file_name = paths.pop().unwrap();
+  paths.reverse();
+  let bucket = paths.pop().unwrap();
+  paths.reverse();
+  let file_path = paths.join("/");
+  Ok((bucket.to_owned(), file_path, file_name.to_owned()))
+}
 
-// }
+fn check_and_create_directory(dir_path_in: &str) -> Result<(), std::io::Error> {
+  let dir_path = Path::new(dir_path_in);
+  if dir_path.exists() {
+    Ok(())
+  } else {
+    create_dir(dir_path)
+  }
+}
+
+fn get_local_locations(
+  backup: &str,
+  bucket: &str,
+  file_path: &str,
+  file_name: &str,
+) -> (PathBuf, PathBuf, PathBuf) {
+  let mut local_dir = PathBuf::new();
+  local_dir.push(backup);
+  local_dir.push(bucket);
+  local_dir.push(file_path);
+
+  let mut local_file = PathBuf::new();
+  local_file.push(&local_dir);
+  local_file.push(&file_name);
+
+  let mut key = PathBuf::new();
+  key.push(file_path);
+  key.push(file_name);
+
+  (local_dir, local_file, key)
+}
+
+fn get_default_backup_path() -> Result<String, std::io::Error> {
+  let current_dir = current_dir()?;
+  let mut default_path = PathBuf::new();
+  default_path.push(current_dir);
+  default_path.push("backup");
+  Ok(default_path.to_string_lossy().to_string())
+}
 
 fn main() {
   if let Err(e) = run() {
@@ -82,16 +122,13 @@ fn main() {
   }
 }
 
-fn run() -> Result<()> {
-  let current_dir = current_dir()?;
-  let defaultPath = Path::new("backup").to_str();
+fn run() -> Result<(), Error> {
+  let default_path_path = get_default_backup_path()?;
 
   // Init arguments
   let matches = App::new("aws-s3-archive")
     .version("0.1")
-    .about(
-      "Download and archive files for s3",
-    )
+    .about("Download and archive files for s3")
     .author("Jonathan Constantinides <jon@joncon.io>")
     .arg(
       Arg::with_name("import")
@@ -103,24 +140,15 @@ fn run() -> Result<()> {
     )
     .arg(
       Arg::with_name("backup")
-        .default_value("./backup")
-        // .required(true)
+        .default_value(&default_path_path)
         .short("b")
         .long("backup")
         .value_name("LOCATION")
         .help("Location to backup bucket to"),
     )
-    // .arg(
-    //   Arg::with_name("dir")
-    //     .short("d")
-    //     .long("directory")
-    //     .value_name("DIRECTORY")
-    //     .help("Directory/prefix for objects"),
-    // )
     .get_matches();
 
   let backup = matches.value_of("backup").unwrap();
-
   check_and_create_directory(&backup)?;
 
   let s3 = S3Client::new(Region::UsWest2);
@@ -128,40 +156,112 @@ fn run() -> Result<()> {
   let f = File::open(matches.value_of("import").unwrap())?;
   let f = BufReader::new(f);
 
-  // let head_req = HeadObjectRequest {};
-  // test.e_tag
+  f.lines()
+    .filter_map(result_to_option_print)
+    .map(|line| line_to_tuple(&line))
+    .filter_map(result_to_option_print)
+    .map(|(bucket, file_path, file_name)| {
+      let (local_dir, local_file, key) =
+        get_local_locations(&backup, &bucket, &file_path, &file_name);
+      let complete_path = format!("{}/{}", &bucket, &key.to_string_lossy().to_string());
 
-  let read_lines = f.lines();
-  let filter: Vec<(String, String)> = read_lines
-    .filter_map(|read_line| match read_line {
-      Ok(line) => Some(line),
-      Err(err) => {
-        eprintln!("Invalid line: {:?}", err);
-        None
+      if let Err(err) = DirBuilder::new().recursive(true).create(&local_dir) {
+        return Err((complete_path, format!("{:?}", err)));
       }
-    })
-    .filter_map(|line| {
-      if line.len() > 5 {
-        let (protocol, location) = line.split_at(5);
-        if protocol == "s3://" {
-          let mut paths: Vec<&str> = location.split("/").collect();
-          paths.reverse();
-          let bucket = paths.pop().unwrap();
-          paths.reverse();
-          let key = paths.join("/");
-          return Some((bucket.to_owned(), key.to_owned()));
+
+      if let Ok(compare_file) = metadata(&local_file) {
+        // Try 3 times for network related issues then fail
+        let mut attempt = 1;
+        loop {
+          match (
+            attempt,
+            s3.head_object(HeadObjectRequest {
+              bucket: bucket.to_string(),
+              key: key.to_string_lossy().to_string(),
+              ..Default::default()
+            }).sync(),
+          ) {
+            (1..=RETRY_ATTEMPTS, Err(HeadObjectError::HttpDispatch(_))) => {
+              attempt += 1;
+              sleep(Duration::from_secs(RETRY_WAIT_SECONDS));
+            }
+            (1..=RETRY_ATTEMPTS, Err(HeadObjectError::Unknown(_))) => {
+              attempt += 1;
+              sleep(Duration::from_secs(RETRY_WAIT_SECONDS));
+            }
+            (_, Err(err)) => {
+              return Err((complete_path, format!("{:?}", err)));
+            }
+            (_, Ok(metadata)) => {
+              let remote_size = metadata.content_length.unwrap();
+              // If incorrect size then continue and re-download
+              if compare_file.len() as i64 == remote_size {
+                return Ok(local_file);
+              }
+              break;
+            }
+          };
         }
       }
-      eprintln!("Invalid line: {}", line);
-      None
-    })
-    .collect();
 
-    // s3.head_object(HeadObjectRequest {
-    //       bucket: bucket.to_string(),
-    //       key: line,
-    //       ..Default::default()
-    //     }).sync()
+      // Try 3 times for network related issues then fail
+      let mut attempt = 1;
+      loop {
+        match (
+          attempt,
+          s3.get_object(GetObjectRequest {
+            bucket: bucket.clone(),
+            key: key.to_string_lossy().into(),
+            ..Default::default()
+          }).sync(),
+        ) {
+          (1..=RETRY_ATTEMPTS, Err(GetObjectError::HttpDispatch(_))) => {
+            attempt += 1;
+            sleep(Duration::from_secs(RETRY_WAIT_SECONDS));
+          }
+          (1..=RETRY_ATTEMPTS, Err(GetObjectError::Unknown(_))) => {
+            attempt += 1;
+            sleep(Duration::from_secs(RETRY_WAIT_SECONDS));
+          }
+          (_, Err(err)) => return Err((complete_path, format!("{:?}", err))),
+          (
+            _,
+            Ok(GetObjectOutput {
+              content_length: Some(remote_size),
+              body: Some(body),
+              ..
+            }),
+          ) => {
+            let body = body.concat2().wait().unwrap();
+
+            let mut f = File::create(&local_file).unwrap();
+            match f.write(&body) {
+              Err(err) => return Err((complete_path, format!("{:?}", err))),
+              Ok(local_size) => {
+                if local_size as i64 == remote_size {
+                  return Ok(local_file);
+                } else {
+                  return Err((complete_path, "File sizes do not match".to_string()));
+                }
+              }
+            }
+          }
+          (1..=RETRY_ATTEMPTS, Ok(_)) => {
+            attempt += 1;
+            sleep(Duration::from_secs(RETRY_WAIT_SECONDS));
+          }
+          (_, Ok(_)) => {
+            return Err((complete_path, "Could not ".to_string()));
+          }
+        };
+      }
+    })
+    .for_each(|res| {
+      match res {
+        Ok(file) => println!("{}", file.to_string_lossy()),
+        Err((file, err)) => eprintln!("ERROR {}: {}", file, err),
+      };
+    });
 
   Ok(())
 }
