@@ -9,6 +9,7 @@ rusoto_core = "0.33.1"
 rusoto_s3 = "0.33.1"
 failure = "0.1.2"
 futures = "0.1.23"
+rayon = "1.0.2"
 
 [profile.release]
 lto = true

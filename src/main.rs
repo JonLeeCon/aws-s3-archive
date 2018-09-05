@@ -11,6 +11,8 @@ extern crate failure;
 extern crate futures;
 extern crate rusoto_core;
 extern crate rusoto_s3;
+extern crate rayon;
+
 
 /* === MODs === */
 
@@ -32,6 +34,7 @@ use rusoto_s3::{
   GetObjectError, GetObjectOutput, GetObjectRequest, HeadObjectError, HeadObjectRequest, S3,
   S3Client,
 };
+use rayon::prelude::*;
 
 /* === CONSTANTS === */
 const RETRY_ATTEMPTS: u32 = 3;
@@ -156,8 +159,11 @@ fn run() -> Result<(), Error> {
   let f = File::open(matches.value_of("import").unwrap())?;
   let f = BufReader::new(f);
 
-  f.lines()
+  let filter: Vec<String> = f.lines()
     .filter_map(result_to_option_print)
+    .collect();
+
+  filter.par_iter()
     .map(|line| line_to_tuple(&line))
     .filter_map(result_to_option_print)
     .map(|(bucket, file_path, file_name)| {
