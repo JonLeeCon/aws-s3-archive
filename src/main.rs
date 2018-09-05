@@ -9,10 +9,9 @@
 extern crate clap;
 extern crate failure;
 extern crate futures;
+extern crate rayon;
 extern crate rusoto_core;
 extern crate rusoto_s3;
-extern crate rayon;
-
 
 /* === MODs === */
 
@@ -29,12 +28,12 @@ use clap::{App, Arg};
 use failure::Error;
 use futures::stream::Stream;
 use futures::Future;
+use rayon::prelude::*;
 use rusoto_core::Region;
 use rusoto_s3::{
   GetObjectError, GetObjectOutput, GetObjectRequest, HeadObjectError, HeadObjectRequest, S3,
   S3Client,
 };
-use rayon::prelude::*;
 
 /* === CONSTANTS === */
 const RETRY_ATTEMPTS: u32 = 3;
@@ -52,7 +51,7 @@ fn result_to_option_print<T, E: std::fmt::Display>(res_in: Result<T, E>) -> Opti
   }
 }
 
-fn line_to_tuple(line: &str) -> Result<(String, String, String), String> {
+fn line_to_tuple(line: &str) -> Result<(&str, String, String, String), String> {
   if line.len() <= 5 {
     return Err(format!("Invalid line: {}", line));
   }
@@ -66,7 +65,7 @@ fn line_to_tuple(line: &str) -> Result<(String, String, String), String> {
   let bucket = paths.pop().unwrap();
   paths.reverse();
   let file_path = paths.join("/");
-  Ok((bucket.to_owned(), file_path, file_name.to_owned()))
+  Ok((line, bucket.to_owned(), file_path, file_name.to_owned()))
 }
 
 fn check_and_create_directory(dir_path_in: &str) -> Result<(), std::io::Error> {
@@ -159,17 +158,15 @@ fn run() -> Result<(), Error> {
   let f = File::open(matches.value_of("import").unwrap())?;
   let f = BufReader::new(f);
 
-  let filter: Vec<String> = f.lines()
-    .filter_map(result_to_option_print)
-    .collect();
+  let filter: Vec<String> = f.lines().filter_map(result_to_option_print).collect();
 
-  filter.par_iter()
-    .map(|line| line_to_tuple(&line))
+  filter
+    .par_iter()
+    .map(|line| line_to_tuple(line))
     .filter_map(result_to_option_print)
-    .map(|(bucket, file_path, file_name)| {
+    .map(|(complete_path, bucket, file_path, file_name)| {
       let (local_dir, local_file, key) =
         get_local_locations(&backup, &bucket, &file_path, &file_name);
-      let complete_path = format!("{}/{}", &bucket, &key.to_string_lossy().to_string());
 
       if let Err(err) = DirBuilder::new().recursive(true).create(&local_dir) {
         return Err((complete_path, format!("{:?}", err)));
@@ -202,7 +199,7 @@ fn run() -> Result<(), Error> {
               let remote_size = metadata.content_length.unwrap();
               // If incorrect size then continue and re-download
               if compare_file.len() as i64 == remote_size {
-                return Ok(local_file);
+                return Ok(complete_path);
               }
               break;
             }
@@ -245,7 +242,7 @@ fn run() -> Result<(), Error> {
               Err(err) => return Err((complete_path, format!("{:?}", err))),
               Ok(local_size) => {
                 if local_size as i64 == remote_size {
-                  return Ok(local_file);
+                  return Ok(complete_path);
                 } else {
                   return Err((complete_path, "File sizes do not match".to_string()));
                 }
@@ -264,7 +261,7 @@ fn run() -> Result<(), Error> {
     })
     .for_each(|res| {
       match res {
-        Ok(file) => println!("{}", file.to_string_lossy()),
+        Ok(file) => println!("{}", file),
         Err((file, err)) => eprintln!("ERROR {}: {}", file, err),
       };
     });
