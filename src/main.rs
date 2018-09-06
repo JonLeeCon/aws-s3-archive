@@ -21,6 +21,7 @@ use std::fs::{create_dir, metadata, DirBuilder, File};
 use std::io::Write;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -30,9 +31,10 @@ use futures::stream::Stream;
 use futures::Future;
 use rayon::prelude::*;
 use rusoto_core::Region;
+
 use rusoto_s3::{
   GetObjectError, GetObjectOutput, GetObjectRequest, HeadObjectError, HeadObjectRequest, S3,
-  S3Client,
+  S3Client
 };
 
 /* === CONSTANTS === */
@@ -148,12 +150,28 @@ fn run() -> Result<(), Error> {
         .value_name("LOCATION")
         .help("Location to backup bucket to"),
     )
+    .arg(
+      Arg::with_name("region")
+        .short("r")
+        .long("region")
+        .value_name("REGION")
+        .help("AWS region (us-west-2)"),
+    )
     .get_matches();
 
   let backup = matches.value_of("backup").unwrap();
   check_and_create_directory(&backup)?;
 
-  let s3 = S3Client::new(Region::UsWest2);
+  // let region = matches.value_of("backup")
+  //   .and_then(|string| Region::from_str(string))
+  //   .or_else(|| Ok(Region::default()));
+
+  let region = if let Some(region) = matches.value_of("region") {
+    Region::from_str(region)?
+  } else {
+     Region::default()
+  };
+  let s3 = S3Client::new(region);
 
   let f = File::open(matches.value_of("import").unwrap())?;
   let f = BufReader::new(f);
