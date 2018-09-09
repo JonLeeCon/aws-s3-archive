@@ -135,6 +135,11 @@ fn run() -> Result<(), Error> {
     .about("Download and archive files for s3")
     .author("Jonathan Constantinides <jon@joncon.io>")
     .arg(
+      Arg::with_name("verify")
+      .help("Verify only")
+      .short("v")
+    )
+    .arg(
       Arg::with_name("import")
         .required(true)
         .short("i")
@@ -159,12 +164,10 @@ fn run() -> Result<(), Error> {
     )
     .get_matches();
 
+  let verify_only = matches.is_present("verify");
+
   let backup = matches.value_of("backup").unwrap();
   check_and_create_directory(&backup)?;
-
-  // let region = matches.value_of("backup")
-  //   .and_then(|string| Region::from_str(string))
-  //   .or_else(|| Ok(Region::default()));
 
   let region = if let Some(region) = matches.value_of("region") {
     Region::from_str(region)?
@@ -176,8 +179,13 @@ fn run() -> Result<(), Error> {
   let f = File::open(matches.value_of("import").unwrap())?;
   let f = BufReader::new(f);
 
-  let filter: Vec<String> = f.lines().filter_map(result_to_option_print).collect();
+  // let req = ListObjectsV2Request {
+  //   // bucket: "",
+  //   ..Default::default()
+  // };
+  // https://rusoto.github.io/rusoto/rusoto_s3/struct.ListObjectsV2Request.html
 
+  let filter: Vec<String> = f.lines().filter_map(result_to_option_print).collect();
   filter
     .par_iter()
     .map(|line| line_to_tuple(line))
@@ -223,6 +231,9 @@ fn run() -> Result<(), Error> {
             }
           };
         }
+      }
+      else if verify_only {
+        return Err((complete_path, "Missing locally".to_string()));
       }
 
       // Try 3 times for network related issues then fail
