@@ -8,15 +8,18 @@ Jonathan Constantinides <jon@joncon.io>
 Download and archive files for s3
 
 USAGE:
-    aws-s3-archive [OPTIONS] --import <IMPORT_FILE>
+    aws-s3-archive [FLAGS] [OPTIONS] --import <IMPORT_FILE>
 
 FLAGS:
+    -d               Verify and delete from S3
     -h, --help       Prints help information
     -V, --version    Prints version information
+    -v               Verify only
 
 OPTIONS:
     -b, --backup <LOCATION>       Location to backup bucket to [default: *current_directory*/backup]
     -i, --import <IMPORT_FILE>    List of files to archive (i.e. s3://BUCKET/PREFIX)
+    -r, --region <REGION>         AWS region (us-west-2)
 ```
 ## Getting Started
 ### Prerequisites
