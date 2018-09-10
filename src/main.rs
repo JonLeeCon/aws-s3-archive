@@ -7,11 +7,11 @@
 
 /* === CRATES === */
 extern crate clap;
-extern crate failure;
 extern crate futures;
 extern crate rayon;
 extern crate rusoto_core;
 extern crate rusoto_s3;
+extern crate failure;
 
 /* === MODs === */
 
@@ -34,12 +34,66 @@ use rusoto_core::Region;
 
 use rusoto_s3::{
   GetObjectError, GetObjectOutput, GetObjectRequest, HeadObjectError, HeadObjectRequest, S3,
-  S3Client
+  S3Client, DeleteObjectRequest, DeleteObjectError
 };
 
 /* === CONSTANTS === */
 const RETRY_ATTEMPTS: u32 = 3;
 const RETRY_WAIT_SECONDS: u64 = 3;
+
+/* === STRUCTS === */
+struct S3Object<'a> {
+  input: &'a str,
+  bucket: String,
+  file_path: String,
+  file_name: String,
+}
+
+impl<'a> S3Object<'a> {
+  fn from(line: &str) -> Result<S3Object, String> {
+    if line.len() <= 5 {
+      return Err(format!("Invalid line: {}", line));
+    }
+    let (protocol, location) = line.split_at(5);
+    if protocol != "s3://" {
+      return Err(format!("Invalid line: {}", line));
+    }
+    let mut paths: Vec<&str> = location.split('/').collect();
+    let file_name = paths.pop().unwrap();
+    paths.reverse();
+    let bucket = paths.pop().unwrap();
+    paths.reverse();
+    let file_path = paths.join("/");
+
+    Ok(S3Object {
+      input: line,
+      bucket: bucket.to_owned(),
+      file_path,
+      file_name: file_name.to_owned()
+    })
+  }
+  fn key(&self) -> PathBuf {
+    let mut key = PathBuf::new();
+    key.push(&self.file_path);
+    key.push(&self.file_name);
+    key
+  }
+  fn local_dir(&self, backup: &str) -> PathBuf {
+    let mut local_dir = PathBuf::new();
+    local_dir.push(backup);
+    local_dir.push(&self.bucket);
+    local_dir.push(&self.file_path);
+    local_dir
+  }
+  fn local_file(&self, backup: &str) -> PathBuf {
+    let mut local_file = PathBuf::new();
+    local_file.push(backup);
+    local_file.push(&self.bucket);
+    local_file.push(&self.file_path);
+    local_file.push(&self.file_name);
+    local_file
+  }
+}
 
 /* === FUNCTIONS ===*/
 
@@ -53,23 +107,6 @@ fn result_to_option_print<T, E: std::fmt::Display>(res_in: Result<T, E>) -> Opti
   }
 }
 
-fn line_to_tuple(line: &str) -> Result<(&str, String, String, String), String> {
-  if line.len() <= 5 {
-    return Err(format!("Invalid line: {}", line));
-  }
-  let (protocol, location) = line.split_at(5);
-  if protocol != "s3://" {
-    return Err(format!("Invalid line: {}", line));
-  }
-  let mut paths: Vec<&str> = location.split('/').collect();
-  let file_name = paths.pop().unwrap();
-  paths.reverse();
-  let bucket = paths.pop().unwrap();
-  paths.reverse();
-  let file_path = paths.join("/");
-  Ok((line, bucket.to_owned(), file_path, file_name.to_owned()))
-}
-
 fn check_and_create_directory(dir_path_in: &str) -> Result<(), std::io::Error> {
   let dir_path = Path::new(dir_path_in);
   if dir_path.exists() {
@@ -77,28 +114,6 @@ fn check_and_create_directory(dir_path_in: &str) -> Result<(), std::io::Error> {
   } else {
     create_dir(dir_path)
   }
-}
-
-fn get_local_locations(
-  backup: &str,
-  bucket: &str,
-  file_path: &str,
-  file_name: &str,
-) -> (PathBuf, PathBuf, PathBuf) {
-  let mut local_dir = PathBuf::new();
-  local_dir.push(backup);
-  local_dir.push(bucket);
-  local_dir.push(file_path);
-
-  let mut local_file = PathBuf::new();
-  local_file.push(&local_dir);
-  local_file.push(&file_name);
-
-  let mut key = PathBuf::new();
-  key.push(file_path);
-  key.push(file_name);
-
-  (local_dir, local_file, key)
 }
 
 fn get_default_backup_path() -> Result<String, std::io::Error> {
@@ -140,6 +155,11 @@ fn run() -> Result<(), Error> {
       .short("v")
     )
     .arg(
+      Arg::with_name("delete")
+      .help("Verify and delete from S3")
+      .short("d")
+    )
+    .arg(
       Arg::with_name("import")
         .required(true)
         .short("i")
@@ -165,6 +185,11 @@ fn run() -> Result<(), Error> {
     .get_matches();
 
   let verify_only = matches.is_present("verify");
+  let verify_and_delete = matches.is_present("delete");
+
+  if verify_only && verify_and_delete {
+    return Err(err_msg("Cannot provide verify-only and delete flags together"));
+  }
 
   let backup = matches.value_of("backup").unwrap();
   check_and_create_directory(&backup)?;
@@ -188,14 +213,15 @@ fn run() -> Result<(), Error> {
   let filter: Vec<String> = f.lines().filter_map(result_to_option_print).collect();
   filter
     .par_iter()
-    .map(|line| line_to_tuple(line))
+    .map(|line| S3Object::from(line))
     .filter_map(result_to_option_print)
-    .map(|(complete_path, bucket, file_path, file_name)| {
-      let (local_dir, local_file, key) =
-        get_local_locations(&backup, &bucket, &file_path, &file_name);
+    .map(|s3object| {
+      let local_dir = s3object.local_dir(&backup);
+      let local_file = s3object.local_file(&backup);
+      let key = s3object.key();
 
       if let Err(err) = DirBuilder::new().recursive(true).create(&local_dir) {
-        return Err((complete_path, format!("{:?}", err)));
+        return Err((s3object.input, format!("{:?}", err)));
       }
 
       if let Ok(compare_file) = metadata(&local_file) {
@@ -205,7 +231,7 @@ fn run() -> Result<(), Error> {
           match (
             attempt,
             s3.head_object(HeadObjectRequest {
-              bucket: bucket.to_string(),
+              bucket: s3object.bucket.to_string(),
               key: key.to_string_lossy().to_string(),
               ..Default::default()
             }).sync(),
@@ -219,13 +245,16 @@ fn run() -> Result<(), Error> {
               sleep(Duration::from_secs(RETRY_WAIT_SECONDS));
             }
             (_, Err(err)) => {
-              return Err((complete_path, format!("{:?}", err)));
+              return Err((s3object.input, format!("{:?}", err)));
             }
             (_, Ok(metadata)) => {
               let remote_size = metadata.content_length.unwrap();
-              // If incorrect size then continue and re-download
+              // If incorrect size then continue and re-download unless verify-only
               if compare_file.len() as i64 == remote_size {
-                return Ok(complete_path);
+                return Ok(s3object);
+              }
+              else if verify_only {
+                return Err((s3object.input, "Local file does not match remote one".to_string()));
               }
               break;
             }
@@ -233,7 +262,7 @@ fn run() -> Result<(), Error> {
         }
       }
       else if verify_only {
-        return Err((complete_path, "Missing locally".to_string()));
+        return Err((s3object.input, "Missing locally".to_string()));
       }
 
       // Try 3 times for network related issues then fail
@@ -242,7 +271,7 @@ fn run() -> Result<(), Error> {
         match (
           attempt,
           s3.get_object(GetObjectRequest {
-            bucket: bucket.clone(),
+            bucket: s3object.bucket.clone(),
             key: key.to_string_lossy().into(),
             ..Default::default()
           }).sync(),
@@ -255,7 +284,7 @@ fn run() -> Result<(), Error> {
             attempt += 1;
             sleep(Duration::from_secs(RETRY_WAIT_SECONDS));
           }
-          (_, Err(err)) => return Err((complete_path, format!("{:?}", err))),
+          (_, Err(err)) => return Err((s3object.input, format!("{:?}", err))),
           (
             _,
             Ok(GetObjectOutput {
@@ -268,12 +297,12 @@ fn run() -> Result<(), Error> {
 
             let mut f = File::create(&local_file).unwrap();
             match f.write(&body) {
-              Err(err) => return Err((complete_path, format!("{:?}", err))),
+              Err(err) => return Err((s3object.input, format!("{:?}", err))),
               Ok(local_size) => {
                 if local_size as i64 == remote_size {
-                  return Ok(complete_path);
+                  return Ok(s3object);
                 } else {
-                  return Err((complete_path, "File sizes do not match".to_string()));
+                  return Err((s3object.input, "File sizes do not match".to_string()));
                 }
               }
             }
@@ -283,14 +312,48 @@ fn run() -> Result<(), Error> {
             sleep(Duration::from_secs(RETRY_WAIT_SECONDS));
           }
           (_, Ok(_)) => {
-            return Err((complete_path, "Could not ".to_string()));
+            return Err((s3object.input, "Could not ".to_string()));
           }
+        };
+      }
+    })
+    .map(|res| {
+      if !verify_and_delete || res.is_err() {
+        return res;
+      }
+      let s3object = res.unwrap();
+
+      // Try 3 times for network related issues then fail
+      let mut attempt = 1;
+      loop {
+        match (
+          attempt,
+          s3.delete_object(DeleteObjectRequest {
+            bucket: s3object.bucket.clone(),
+            key: s3object.key().to_string_lossy().to_string(),
+            ..Default::default()
+          }).sync(),
+        ) {
+            (1..=RETRY_ATTEMPTS, Err(DeleteObjectError::HttpDispatch(_))) => {
+              attempt += 1;
+              sleep(Duration::from_secs(RETRY_WAIT_SECONDS));
+            }
+            (1..=RETRY_ATTEMPTS, Err(DeleteObjectError::Unknown(_))) => {
+              attempt += 1;
+              sleep(Duration::from_secs(RETRY_WAIT_SECONDS));
+            }
+            (_, Err(err)) => {
+              return Err((s3object.input, format!("{:?}", err)));
+            }
+            (_, Ok(_)) => {
+              return Ok(s3object);
+            }
         };
       }
     })
     .for_each(|res| {
       match res {
-        Ok(file) => println!("{}", file),
+        Ok(s3object) => println!("{}", s3object.input),
         Err((file, err)) => eprintln!("ERROR {}: {}", file, err),
       };
     });
