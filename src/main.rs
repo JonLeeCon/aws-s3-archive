@@ -26,7 +26,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use clap::{App, Arg};
-use failure::Error;
+use failure::{Error, err_msg};
 use futures::stream::Stream;
 use futures::Future;
 use rayon::prelude::*;
