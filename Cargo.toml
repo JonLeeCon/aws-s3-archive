@@ -5,8 +5,8 @@ authors = ["JonCon <joncon@upchannel.com>"]
 
 [dependencies]
 clap = "2.33.0"
-rusoto_core = "0.40.0"
-rusoto_s3 = "0.40.0"
+rusoto_core = { version = "0.40.0", default_features = false, features=["rustls"] }
+rusoto_s3 = { version = "0.40.0", default_features = false, features=["rustls"] }
 failure = "0.1.5"
 futures = "0.1.28"
 rayon = "1.2.0"
