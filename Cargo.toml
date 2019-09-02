@@ -4,12 +4,12 @@ version = "0.1.0"
 authors = ["JonCon <joncon@upchannel.com>"]
 
 [dependencies]
-clap = "2.32.0"
-rusoto_core = "0.33.1"
-rusoto_s3 = "0.33.1"
-failure = "0.1.2"
-futures = "0.1.23"
-rayon = "1.0.2"
+clap = "2.33.0"
+rusoto_core = "0.40.0"
+rusoto_s3 = "0.40.0"
+failure = "0.1.5"
+futures = "0.1.28"
+rayon = "1.2.0"
 
 [profile.release]
 lto = true

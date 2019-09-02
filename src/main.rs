@@ -30,11 +30,11 @@ use failure::{Error, err_msg};
 use futures::stream::Stream;
 use futures::Future;
 use rayon::prelude::*;
-use rusoto_core::Region;
+use rusoto_core::{Region, RusotoError};
 
 use rusoto_s3::{
-  GetObjectError, GetObjectOutput, GetObjectRequest, HeadObjectError, HeadObjectRequest, S3,
-  S3Client, DeleteObjectRequest, DeleteObjectError
+  GetObjectOutput, GetObjectRequest, HeadObjectRequest, S3,
+  S3Client, DeleteObjectRequest
 };
 
 /* === CONSTANTS === */
@@ -126,7 +126,6 @@ fn get_default_backup_path() -> Result<String, std::io::Error> {
 
 fn main() {
   if let Err(e) = run() {
-    use std::io::Write;
     let stderr = &mut ::std::io::stderr();
     let errmsg = "Error writing to stderr";
 
@@ -236,11 +235,11 @@ fn run() -> Result<(), Error> {
               ..Default::default()
             }).sync(),
           ) {
-            (1..=RETRY_ATTEMPTS, Err(HeadObjectError::HttpDispatch(_))) => {
+            (1..=RETRY_ATTEMPTS, Err(RusotoError::HttpDispatch(_))) => {
               attempt += 1;
               sleep(Duration::from_secs(RETRY_WAIT_SECONDS));
             }
-            (1..=RETRY_ATTEMPTS, Err(HeadObjectError::Unknown(_))) => {
+            (1..=RETRY_ATTEMPTS, Err(RusotoError::Unknown(_))) => {
               attempt += 1;
               sleep(Duration::from_secs(RETRY_WAIT_SECONDS));
             }
@@ -276,11 +275,11 @@ fn run() -> Result<(), Error> {
             ..Default::default()
           }).sync(),
         ) {
-          (1..=RETRY_ATTEMPTS, Err(GetObjectError::HttpDispatch(_))) => {
+          (1..=RETRY_ATTEMPTS, Err(RusotoError::HttpDispatch(_))) => {
             attempt += 1;
             sleep(Duration::from_secs(RETRY_WAIT_SECONDS));
           }
-          (1..=RETRY_ATTEMPTS, Err(GetObjectError::Unknown(_))) => {
+          (1..=RETRY_ATTEMPTS, Err(RusotoError::Unknown(_))) => {
             attempt += 1;
             sleep(Duration::from_secs(RETRY_WAIT_SECONDS));
           }
@@ -334,11 +333,11 @@ fn run() -> Result<(), Error> {
             ..Default::default()
           }).sync(),
         ) {
-            (1..=RETRY_ATTEMPTS, Err(DeleteObjectError::HttpDispatch(_))) => {
+            (1..=RETRY_ATTEMPTS, Err(RusotoError::HttpDispatch(_))) => {
               attempt += 1;
               sleep(Duration::from_secs(RETRY_WAIT_SECONDS));
             }
-            (1..=RETRY_ATTEMPTS, Err(DeleteObjectError::Unknown(_))) => {
+            (1..=RETRY_ATTEMPTS, Err(RusotoError::Unknown(_))) => {
               attempt += 1;
               sleep(Duration::from_secs(RETRY_WAIT_SECONDS));
             }
